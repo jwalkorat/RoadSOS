@@ -1,0 +1,39 @@
+{
+  "places": [
+    {
+      "type": "trauma",
+      "lat": 21.2360,
+      "lng": 72.8640,
+      "name": "City General Hospital (Offline Data)",
+      "phone": "9876543210"
+    },
+    {
+      "type": "trauma",
+      "lat": 21.2345,
+      "lng": 72.8625,
+      "name": "Metro Trauma Center (Offline Data)",
+      "phone": "9876543211"
+    },
+    {
+      "type": "police",
+      "lat": 21.2375,
+      "lng": 72.8660,
+      "name": "Central Police Station (Offline Data)",
+      "phone": "100"
+    },
+    {
+      "type": "police",
+      "lat": 21.2330,
+      "lng": 72.8610,
+      "name": "Highway Patrol Outpost (Offline Data)",
+      "phone": "100"
+    },
+    {
+      "type": "ambulance",
+      "lat": 21.2355,
+      "lng": 72.8635,
+      "name": "Local Ambulance Dispatch (Offline)",
+      "phone": "108"
+    }
+  ]
+}

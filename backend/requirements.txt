@@ -1,0 +1,5 @@
+flask==3.0.3
+twilio==9.0.4
+groq
+geopy
+requests
