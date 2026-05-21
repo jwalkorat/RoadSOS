@@ -1,4 +1,5 @@
 import logging
+import os
 import requests as req
 import groq
 from flask import Flask, request, jsonify
@@ -6,34 +7,44 @@ from twilio.rest import Client
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from twilio.twiml.messaging_response import MessagingResponse
 
-# ─────────────────────────────────────────────────────────────────
-# CONFIG — Replace with your real keys
-# ─────────────────────────────────────────────────────────────────
-TWILIO_ACCOUNT_SID  = "YOUR_TWILIO_ACCOUNT_SID"
-TWILIO_AUTH_TOKEN   = "YOUR_TWILIO_AUTH_TOKEN"
-TWILIO_PHONE_NUMBER = "+1YOUR_TWILIO_NUMBER"
-TARGET_PHONE_NUMBER = "+91YOUR_TEST_NUMBER"   # Test number (change to 108/100 for live)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-# Add as many Groq keys here as you want to bypass the 30 RPM limit
-GROQ_API_KEYS = [
-    "YOUR_GROQ_API_KEY_1",
-    "YOUR_GROQ_API_KEY_2",
-]
+
+# ─────────────────────────────────────────────────────────────────
+# CONFIG — Loaded dynamically from environment variables
+# ─────────────────────────────────────────────────────────────────
+TWILIO_ACCOUNT_SID  = os.getenv("TWILIO_ACCOUNT_SID", "AC00000000000000000000000000000000")
+TWILIO_AUTH_TOKEN   = os.getenv("TWILIO_AUTH_TOKEN", "00000000000000000000000000000000")
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "+17623713288")
+TARGET_PHONE_NUMBER = os.getenv("TARGET_PHONE_NUMBER", "+917359129704")
+
+# Add as many Groq keys here as you want to bypass the 30 RPM limit, comma-separated
+groq_keys_raw = os.getenv("GROQ_API_KEYS", "")
+if groq_keys_raw:
+    GROQ_API_KEYS = [k.strip() for k in groq_keys_raw.split(",") if k.strip()]
+else:
+    GROQ_API_KEYS = ["YOUR_GROQ_API_KEY"]
+
 groq_key_index = 0
 
 def get_next_groq_key():
     global groq_key_index
+    if not GROQ_API_KEYS:
+        return "YOUR_GROQ_API_KEY"
     key = GROQ_API_KEYS[groq_key_index]
-    # Skip placeholder keys
-    while "YOUR_" in key:
+    has_actual_keys = any("YOUR_" not in k for k in GROQ_API_KEYS)
+    while "YOUR_" in key and has_actual_keys:
         groq_key_index = (groq_key_index + 1) % len(GROQ_API_KEYS)
         key = GROQ_API_KEYS[groq_key_index]
     
     groq_key_index = (groq_key_index + 1) % len(GROQ_API_KEYS)
     return key
 
-# The permanent public URL of this server (localtunnel permanent subdomain)
-PUBLIC_URL = "https://roadsos-emergency.loca.lt"
+# Dynamic URLs will be used instead of hardcoded PUBLIC_URL
 
 # ─────────────────────────────────────────────────────────────────
 # INIT
@@ -87,7 +98,7 @@ def get_lang(country_code):
     return COUNTRY_LANG.get(country_code, DEFAULT_LANG)
 
 
-def build_system_prompt(category, address, country_code, lang_code):
+def build_system_prompt(category, address, lat, lng, country_code, lang_code):
     """Dynamic system prompt based on emergency type + location."""
     language_name = lang_code.split("-")[0].upper()
 
@@ -118,7 +129,7 @@ CRITICAL RULES — follow them exactly:
 2. The default language is '{lang_code}'. However, if the operator speaks to you in a different language, YOU MUST switch and reply natively in their language.
 3. DO NOT output asterisks (*), markdown, or ellipses (...). The voice engine will read them out loud as "dot dot dot". Use plain conversational text and commas only.
 4. The victim's location is: {address}
-5. If asked for GPS, you can say: the address is {address}.
+5. The exact GPS coordinates are {lat}, {lng}. If asked for exact GPS, you MUST translate the words "Latitude" and "Longitude" into the caller's language and read the numbers clearly.
 6. If asked for symptoms/condition: say it was a silent panic button, exact condition unknown, treat as critical.
 7. If asked for name/identity: say the identity is unknown, it was triggered by an automated SOS application.
 8. Never say you are an AI unless directly asked. Just dispatch facts.
@@ -126,10 +137,10 @@ CRITICAL RULES — follow them exactly:
 JSON FORMAT REQUIRED:
 {{
     "language_code": "<Twilio language code of your reply, e.g., 'gu-IN' for Gujarati, 'hi-IN' for Hindi, 'fr-FR' for French>",
-    "reply": "<Your 2-sentence conversational reply in that language>"
+    "reply": "<Your 2-sentence conversational reply in that language>",
+    "call_status": "<'keep_call_active' or 'hang_up_call'. Output 'hang_up_call' ONLY if the emergency is resolved AND the operator no longer needs you, OR if they explicitly ask to cut the call. IF THE OPERATOR ASKS YOU NOT TO CUT THE CALL, YOU MUST OUTPUT 'keep_call_active' NO MATTER WHAT.>"
 }}
 """.strip()
-
 
 def ask_gemini(system_prompt, conversation_history, user_message):
     """Send conversation to Groq and get a super-fast response with key rotation."""
@@ -147,7 +158,7 @@ def ask_gemini(system_prompt, conversation_history, user_message):
             # max_retries=0 prevents the SDK from sleeping for 19s on rate limits, which causes Twilio to timeout.
             client = groq.Groq(api_key=next_key, max_retries=0)
             response = client.chat.completions.create(
-                model="llama-3.1-8b-instant",
+                model="llama-3.3-70b-versatile",
                 messages=messages,
                 response_format={"type": "json_object"},
                 max_tokens=500,
@@ -180,6 +191,7 @@ def build_twiml_gather(say_text, lang_code, action_url):
         method="POST",
         language=lang_code,
         speech_timeout="auto",
+        actionOnEmptyResult="true",
         hints="location, address, ambulance, police, injury, bleeding, help, emergency, trauma"
     )
     
@@ -226,7 +238,7 @@ def trigger_call():
         logging.info(f"📍 Address: {address} | Country: {country_code} | Lang: {lang_code}")
 
         # Step 2: Build the system prompt for this session
-        system_prompt = build_system_prompt(category, address, country_code, lang_code)
+        system_prompt = build_system_prompt(category, address, lat, lng, country_code, lang_code)
 
         # Step 3: Opening statement (fast — no AI needed for first line)
         opening = (
@@ -247,7 +259,7 @@ def trigger_call():
             twiml=build_twiml_gather(
                 opening,
                 lang_code,
-                f"{PUBLIC_URL}/ai-response?category={encoded_category}&address={encoded_address}&lang={lang_code}"
+                f"{tunnel_base}/ai-response?category={encoded_category}&address={encoded_address}&lat={lat}&lng={lng}&lang={lang_code}"
             )
         )
 
@@ -279,6 +291,8 @@ def ai_response():
         speech_result = request.values.get('SpeechResult', '').strip()
         category      = request.args.get('category', 'Medical Emergency')
         address       = request.args.get('address', 'Unknown location')
+        lat           = request.args.get('lat', 'unknown')
+        lng           = request.args.get('lng', 'unknown')
         lang_code     = request.args.get('lang', 'en-US')
         voice         = get_lang("IN")[1] if "IN" in lang_code else "Polly.Joanna"
 
@@ -288,15 +302,30 @@ def ai_response():
         if call_sid not in call_sessions:
             call_sessions[call_sid] = {
                 "history": [],
-                "system_prompt": build_system_prompt(category, address, "XX", lang_code)
+                "system_prompt": build_system_prompt(category, address, lat, lng, "XX", lang_code),
+                "empty_count": 0,
+                "latest_address": address,
+                "latest_lat": lat,
+                "latest_lng": lng
             }
 
         session       = call_sessions[call_sid]
         system_prompt = session["system_prompt"]
         history       = session["history"]
 
+        # Check for silence/timeout
         if not speech_result:
-            speech_result = "Can you repeat the location?"
+            session["empty_count"] = session.get("empty_count", 0) + 1
+            if session["empty_count"] >= 2:
+                logging.info(f"📴 Hanging up due to repeated silence. CallSid: {call_sid}")
+                resp = VoiceResponse()
+                resp.say("No response detected. Terminating emergency call. Help has been requested.", language=lang_code)
+                resp.hangup()
+                return str(resp), 200, {'Content-Type': 'text/xml'}
+            
+            speech_result = "Can you repeat the location or confirm help is on the way?"
+        else:
+            session["empty_count"] = 0  # reset on active speech
 
         # Get AI response (JSON)
         json_response_text = ask_gemini(system_prompt, history, speech_result)
@@ -306,25 +335,75 @@ def ai_response():
             data = json.loads(json_response_text)
             ai_reply = data.get("reply", "Dispatching help now.")
             new_lang_code = data.get("language_code", lang_code)
+            call_status = data.get("call_status", "keep_call_active")
             logging.info(f"🤖 AI dynamically switched language to: {new_lang_code}")
         except Exception as e:
             logging.error(f"Failed to parse AI JSON: {e}")
             ai_reply = json_response_text.strip()
             new_lang_code = lang_code
+            call_status = "keep_call_active"
 
         logging.info(f"🤖 AI reply: '{ai_reply}'")
 
         # Save to history
         history.append({"operator": speech_result, "agent": ai_reply})
 
+        # Save session to file for persistent debugging
+        import os
+        os.makedirs("logs", exist_ok=True)
+        with open(f"logs/session_{call_sid}.json", "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=4, ensure_ascii=False)
+
         # Build tunnel base from request
         tunnel_base  = request.host_url.rstrip('/')
+        
+        # If call_status is hang_up_call, hang up!
+        if call_status == "hang_up_call":
+            logging.info(f"📴 AI decided to hang up. CallSid: {call_sid}")
+            
+            # Map explicit Google Cloud voices for languages that Twilio Basic/Polly don't support natively
+            voice = None
+            if "gu-IN" in new_lang_code: voice = "Google.gu-IN-Standard-A"
+            elif "mr-IN" in new_lang_code: voice = "Google.mr-IN-Standard-A"
+            elif "ta-IN" in new_lang_code: voice = "Google.ta-IN-Standard-A"
+            elif "te-IN" in new_lang_code: voice = "Google.te-IN-Standard-A"
+            elif "bn-IN" in new_lang_code: voice = "Google.bn-IN-Standard-A"
+            elif "hi-IN" in new_lang_code: voice = "Polly.Aditi"
+            elif "en-IN" in new_lang_code: voice = "Polly.Aditi"
+
+            import urllib.parse
+            encoded_cat  = urllib.parse.quote(category)
+            encoded_addr = urllib.parse.quote(address)
+            action_url   = f"{tunnel_base}/ai-response?category={encoded_cat}&address={encoded_addr}&lat={lat}&lng={lng}&lang={new_lang_code}"
+
+            resp = VoiceResponse()
+            
+            # Put the final message in a Gather so the user can barge in and say "don't cut"
+            gather = Gather(
+                input="speech",
+                action=action_url,
+                method="POST",
+                language=new_lang_code,
+                speech_timeout="auto",
+                timeout=3, # Wait 3 seconds after speaking before hanging up
+                actionOnEmptyResult="false" # If no speech, fall through to Hangup
+            )
+            
+            if voice:
+                gather.say(ai_reply, voice=voice, language=new_lang_code)
+            else:
+                gather.say(ai_reply, language=new_lang_code)
+                
+            resp.append(gather)
+            resp.hangup()
+            return str(resp), 200, {'Content-Type': 'text/xml'}
+
         import urllib.parse
         encoded_cat  = urllib.parse.quote(category)
         encoded_addr = urllib.parse.quote(address)
         
         # Pass the NEW lang_code in the action URL so the next Twilio <Gather> listens in the new language!
-        action_url   = f"{PUBLIC_URL}/ai-response?category={encoded_cat}&address={encoded_addr}&lang={new_lang_code}"
+        action_url   = f"{tunnel_base}/ai-response?category={encoded_cat}&address={encoded_addr}&lat={lat}&lng={lng}&lang={new_lang_code}"
 
         twiml = build_twiml_gather(ai_reply, new_lang_code, action_url)
         return twiml, 200, {'Content-Type': 'text/xml'}
@@ -374,7 +453,7 @@ def incoming_sms():
                 twiml=build_twiml_gather(
                     opening,
                     lang_code,
-                    f"{PUBLIC_URL}/ai-response?category={encoded_cat}&address={encoded_addr}&lang={lang_code}"
+                    f"{tunnel_base}/ai-response?category={encoded_cat}&address={encoded_addr}&lat={lat}&lng={lng}&lang={lang_code}"
                 )
             )
             logging.info(f"📞 Offline SOS Call initiated! SID: {call.sid}")
@@ -395,7 +474,43 @@ def incoming_sms():
         return "Error", 500
 
 
+# ─────────────────────────────────────────────────────────────────
+# ROUTE 4: Live Location Updates from Flutter App
+# ─────────────────────────────────────────────────────────────────
+@app.route('/update-location', methods=['POST'])
+def update_location():
+    try:
+        data = request.json or {}
+        call_sid = data.get('call_sid')
+        lat = data.get('lat')
+        lng = data.get('lng')
+
+        if call_sid and call_sid in call_sessions and lat and lng:
+            address, _ = reverse_geocode(lat, lng)
+            session = call_sessions[call_sid]
+            
+            # If address changed, inject a system note so AI knows
+            if session.get("latest_address") != address or session.get("latest_lat") != lat:
+                session["latest_address"] = address
+                session["latest_lat"] = lat
+                session["latest_lng"] = lng
+                session["history"].append({
+                    "operator": "[SYSTEM NOTE: DO NOT REPLY TO THIS]", 
+                    "agent": f"The victim's location has updated to Address: {address}. GPS: Lat {lat}, Lng {lng}. Use this if asked."
+                })
+                logging.info(f"📍 Updated session location for {call_sid} to {address}")
+            return jsonify({"success": True, "address": address})
+        return jsonify({"success": False, "error": "Invalid session or missing data"}), 400
+    except Exception as e:
+        logging.error(f"Error in update_location: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/debug-sessions', methods=['GET'])
+def debug_sessions():
+    return jsonify(call_sessions)
+
+
 if __name__ == '__main__':
     print("Starting RoadSOS AI Agent Backend...")
-    print("Endpoints: /trigger-call  /ai-response  /incoming-sms")
+    print("Endpoints: /trigger-call  /ai-response  /incoming-sms  /update-location  /debug-sessions")
     app.run(host='0.0.0.0', port=5000, debug=True)

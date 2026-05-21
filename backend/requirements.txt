@@ -3,3 +3,5 @@ twilio==9.0.4
 groq
 geopy
 requests
+gunicorn
+python-dotenv
