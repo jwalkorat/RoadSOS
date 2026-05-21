@@ -11,6 +11,9 @@ import 'package:flutter/services.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter_ringtone_player/flutter_ringtone_player.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:model_viewer_plus/model_viewer_plus.dart';
+
+const String SERVER_URL = 'https://road-sos-flax.vercel.app';
 
 class GpsHomePage extends StatefulWidget {
   const GpsHomePage({super.key});
@@ -50,6 +53,9 @@ class _GpsHomePageState extends State<GpsHomePage> {
   // Bottom Panel Dragging
   double _bottomPanelOffset = 0;
   bool _isDraggingPanel = false;
+
+  String? _currentCallSid;
+  StreamSubscription<Position>? _positionStream;
 
   static const LatLng _defaultCenter = LatLng(23.0225, 72.5714);
 
@@ -137,6 +143,7 @@ class _GpsHomePageState extends State<GpsHomePage> {
   @override
   void dispose() {
     _sosTimer?.cancel();
+    _positionStream?.cancel();
     FlutterRingtonePlayer().stop();
     _mapController?.dispose();
     super.dispose();
@@ -214,6 +221,132 @@ class _GpsHomePageState extends State<GpsHomePage> {
     }
   }
 
+  void _showSmsFailureDialog(String errorCode, String errorMessage) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return Dialog(
+          backgroundColor: const Color(0xFF0A0E1A),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+            side: const BorderSide(color: Color(0xFFEF4444), width: 2),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 28),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF7F1D1D).withOpacity(0.4),
+                    shape: BoxShape.circle,
+                    border: Border.all(color: const Color(0xFFEF4444), width: 1.5),
+                  ),
+                  child: const Icon(
+                    Icons.signal_cellular_connected_no_internet_4_bar,
+                    color: Color(0xFFF87171),
+                    size: 40,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                Text(
+                  'Carrier SMS Transmission Failed',
+                  style: GoogleFonts.outfit(
+                    color: Colors.white,
+                    fontSize: 22,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 0.5,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  'Your carrier rejected the emergency SMS ($errorMessage). This usually happens due to zero balance, expired recharge validity, or lack of cellular network signal.',
+                  style: GoogleFonts.outfit(
+                    color: const Color(0xFF94A3B8),
+                    fontSize: 14,
+                    height: 1.5,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 28),
+                ElevatedButton.icon(
+                  onPressed: () async {
+                    Navigator.pop(ctx);
+                    final telUri = Uri.parse('tel:112');
+                    if (await canLaunchUrl(telUri)) {
+                      await launchUrl(telUri);
+                    } else {
+                      _showToast('❌ Could not launch dialer', Colors.red.shade800);
+                    }
+                  },
+                  icon: const Icon(Icons.phone_in_talk, color: Colors.white),
+                  label: Text(
+                    'CALL 112 (Toll-Free)',
+                    style: GoogleFonts.outfit(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 1.0,
+                    ),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFEF4444),
+                    foregroundColor: Colors.white,
+                    minimumSize: const Size(double.infinity, 54),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    elevation: 4,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    _searchOffline();
+                  },
+                  icon: const Icon(Icons.storage, color: Color(0xFF22D3EE)),
+                  label: Text(
+                    'LOAD NEAREST HOSPITALS (OFFLINE)',
+                    style: GoogleFonts.outfit(
+                      color: const Color(0xFF22D3EE),
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFF22D3EE),
+                    side: const BorderSide(color: Color(0xFF0891B2), width: 1.5),
+                    minimumSize: const Size(double.infinity, 50),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: Text(
+                    'Dismiss',
+                    style: GoogleFonts.outfit(
+                      color: const Color(0xFF64748B),
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   // ── Server-Initiated Twilio SOS ──
   void _triggerSosCountdown() {
     if (_currentPosition == null) {
@@ -246,6 +379,7 @@ class _GpsHomePageState extends State<GpsHomePage> {
 
   void _cancelSos({bool triggerServer = false}) {
     _sosTimer?.cancel();
+    _positionStream?.cancel();
     FlutterRingtonePlayer().stop();
     
     if (mounted) {
@@ -288,8 +422,12 @@ class _GpsHomePageState extends State<GpsHomePage> {
             "msg": body
           });
           _showToast('✅ Offline SOS sent in background!', const Color(0xFF059669));
+        } on PlatformException catch (e) {
+          _showToast('❌ Carrier SMS Error: ${e.message}', Colors.red.shade800);
+          _showSmsFailureDialog(e.code, e.message ?? 'Unknown carrier error');
         } catch (e) {
           _showToast('❌ Failed to send background SMS.', Colors.red.shade800);
+          _showSmsFailureDialog('ERR_UNKNOWN', e.toString());
         }
       } else {
         // Fallback to manual send if permission is denied
@@ -303,8 +441,8 @@ class _GpsHomePageState extends State<GpsHomePage> {
       return;
     }
 
-    // PERMANENT localtunnel URL — never changes!
-    final uri = Uri.parse('https://roadsos-emergency.loca.lt/trigger-call');
+    // PERMANENT SERVER URL
+    final uri = Uri.parse('$SERVER_URL/trigger-call');
     
     try {
       final response = await http.post(
@@ -322,14 +460,46 @@ class _GpsHomePageState extends State<GpsHomePage> {
 
       if (response.statusCode == 200) {
         _showToast('📞 Server is calling your phone now!', const Color(0xFF059669));
+        final data = jsonDecode(response.body);
+        if (data['call_sid'] != null) {
+          _currentCallSid = data['call_sid'];
+          _startLocationUpdates();
+        }
       } else {
         _showToast('❌ Server Error: ${response.statusCode}', Colors.red.shade800);
       }
     } catch (e) {
       // If 10.0.2.2 fails, they might be on a real device. Show helpful error.
-      _showToast('❌ Failed to connect to server. Run ngrok if testing on physical phone!', Colors.red.shade800);
+      _showToast('❌ Failed to connect to server.', Colors.red.shade800);
       debugPrint("SOS Error: $e");
     }
+  }
+
+  void _startLocationUpdates() {
+    _positionStream?.cancel();
+    _positionStream = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 20, // Only trigger if user moves 20+ meters
+      ),
+    ).listen((Position position) async {
+      if (_currentCallSid == null) return;
+      
+      try {
+        await http.post(
+          Uri.parse('$SERVER_URL/update-location'),
+          headers: {'Content-Type': 'application/json', 'Bypass-Tunnel-Reminder': 'true'},
+          body: jsonEncode({
+            'call_sid': _currentCallSid,
+            'lat': position.latitude,
+            'lng': position.longitude,
+          }),
+        );
+        debugPrint("Location updated to server");
+      } catch (e) {
+        debugPrint("Location update failed: $e");
+      }
+    });
   }
 
   // ── OSRM Road-distance: find true nearest by road ──
@@ -751,6 +921,134 @@ class _GpsHomePageState extends State<GpsHomePage> {
     if (await canLaunchUrl(uri)) await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
+  void _launchGoogleMapsTriageSearch(String specialty) async {
+    if (_currentPosition == null) return;
+    final lat = _currentPosition!.latitude;
+    final lng = _currentPosition!.longitude;
+    final uri = Uri.parse('https://www.google.com/maps/search/?api=1&query=${Uri.encodeComponent("$specialty near $lat,$lng")}');
+    if (await canLaunchUrl(uri)) await launchUrl(uri, mode: LaunchMode.externalApplication);
+  }
+
+  void _showTriageDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        Offset? tapPosition;
+        String? doctorType;
+        String? searchQuery;
+        
+        return StatefulBuilder(
+          builder: (context, setState) {
+            return Dialog(
+              backgroundColor: const Color(0xFF0A0E1A),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+                side: const BorderSide(color: Color(0xFF1E3A8A), width: 1.5)
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(20.0),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text('Triage Smart Search', style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 8),
+                    const Text('Swipe to rotate. Tap injury to select.', style: TextStyle(color: Colors.white70, fontSize: 13), textAlign: TextAlign.center),
+                    const SizedBox(height: 20),
+                    Container(
+                      height: 380,
+                      width: 250, // Fixed width to calculate percentX accurately
+                      decoration: BoxDecoration(
+                        color: Colors.black26,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: Colors.cyan.withOpacity(0.3))
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(16),
+                        child: Stack(
+                          children: [
+                            // Using Listener allows the native 3D webview to receive all swipe/pan gestures for smooth rotation,
+                            // while STILL allowing Flutter to perfectly calculate exactly where you tapped!
+                            Listener(
+                              onPointerUp: (event) {
+                                final double x = event.localPosition.dx;
+                                final double y = event.localPosition.dy;
+                                final double percentX = x / 250.0;
+                                final double percentY = y / 380.0;
+                                
+                                // Ignore taps on empty space (left and right edges)
+                                if (percentX < 0.25 || percentX > 0.75) return;
+                                
+                                setState(() {
+                                  tapPosition = event.localPosition;
+                                  if (percentY < 0.20) {
+                                    doctorType = 'Neurology';
+                                    searchQuery = 'Neurology Hospital';
+                                  } else if (percentY < 0.45) {
+                                    doctorType = 'Cardiac/Pulmonary';
+                                    searchQuery = 'Cardiac Hospital';
+                                  } else if (percentY < 0.65) {
+                                    doctorType = 'Trauma/Internal';
+                                    searchQuery = 'Trauma Center';
+                                  } else {
+                                    doctorType = 'Orthopedic';
+                                    searchQuery = 'Orthopedic Hospital';
+                                  }
+                                });
+                              },
+                              child: const ModelViewer(
+                                src: 'assets/anatomy.glb',
+                                alt: 'A 3D model of a human',
+                                ar: false,
+                                autoRotate: false,
+                                cameraControls: true,
+                                disableZoom: true,
+                                backgroundColor: Colors.transparent,
+                                innerModelViewerHtml: '<style>model-viewer {background-color: transparent;}</style>',
+                              ),
+                            ),
+                            if (tapPosition != null)
+                              // We wrap the icon in IgnorePointer so tapping the target doesn't block rotating the body underneath it
+                              Positioned(
+                                left: tapPosition!.dx - 15,
+                                top: tapPosition!.dy - 15,
+                                child: const IgnorePointer(
+                                  child: Icon(Icons.location_searching, color: Colors.redAccent, size: 30)
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    if (doctorType != null) ...[
+                      ElevatedButton.icon(
+                        onPressed: () {
+                          Navigator.pop(ctx);
+                          _launchGoogleMapsTriageSearch(searchQuery!);
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.redAccent,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        ),
+                        icon: const Icon(Icons.local_hospital, color: Colors.white),
+                        label: Text('Search $doctorType', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                    TextButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      child: const Text('Cancel', style: TextStyle(color: Colors.white54)),
+                    )
+                  ],
+                ),
+              ),
+            );
+          }
+        );
+      }
+    );
+  }
+
   void _callNumber(String phone) async {
     if (phone.isEmpty) {
       if (!mounted) return;
@@ -1169,6 +1467,23 @@ class _GpsHomePageState extends State<GpsHomePage> {
               ),
             ),
           ),
+
+          if (_selectedCategory == 'trauma') ...[
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity, height: 50,
+              child: ElevatedButton.icon(
+                onPressed: _showTriageDialog,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF111827),
+                  side: const BorderSide(color: Color(0xFFEF4444), width: 1.5),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                ),
+                icon: const Icon(Icons.accessibility_new, size: 18, color: Color(0xFFEF4444)),
+                label: const Text('🎯 Triage Smart Search', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Color(0xFFEF4444))),
+              ),
+            ),
+          ],
 
           if (_nearbyPlaces.isNotEmpty) ...[
             const SizedBox(height: 10),

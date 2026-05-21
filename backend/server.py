@@ -350,9 +350,13 @@ def ai_response():
 
         # Save session to file for persistent debugging
         import os
-        os.makedirs("logs", exist_ok=True)
-        with open(f"logs/session_{call_sid}.json", "w", encoding="utf-8") as f:
-            json.dump(history, f, indent=4, ensure_ascii=False)
+        try:
+            log_dir = "/tmp/logs" if os.name != "nt" else "logs"
+            os.makedirs(log_dir, exist_ok=True)
+            with open(os.path.join(log_dir, f"session_{call_sid}.json"), "w", encoding="utf-8") as f:
+                json.dump(history, f, indent=4, ensure_ascii=False)
+        except Exception as log_err:
+            logging.warning(f"Could not write session log: {log_err}")
 
         # Build tunnel base from request
         tunnel_base  = request.host_url.rstrip('/')
