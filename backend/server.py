@@ -509,9 +509,88 @@ def update_location():
         logging.error(f"Error in update_location: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
+@app.route('/sync-emergency', methods=['GET'])
+def sync_emergency():
+    try:
+        lat = request.args.get('lat')
+        lng = request.args.get('lng')
+        if not lat or not lng:
+            return jsonify({"success": False, "error": "Missing lat or lng"}), 400
+
+        # OSM Overpass Interpreter URL
+        overpass_url = "https://overpass-api.de/api/interpreter"
+        
+        # Query for hospitals, police stations, and ambulance stations within 30000m (30km)
+        query = f"""
+        [out:json][timeout:25];
+        (
+          node["amenity"="hospital"](around:30000, {lat}, {lng});
+          node["amenity"="police"](around:30000, {lat}, {lng});
+          node["emergency"="ambulance_station"](around:30000, {lat}, {lng});
+        );
+        out body;
+        """
+        
+        logging.info(f"🔍 OSM Query for lat={lat}, lng={lng}...")
+        resp = req.post(overpass_url, data={'data': query}, timeout=15)
+        
+        if resp.status_code != 200:
+            logging.error(f"OSM Overpass API returned status {resp.status_code}")
+            return jsonify({"success": False, "error": f"OSM API returned error: {resp.status_code}"}), 502
+            
+        elements = resp.json().get('elements', [])
+        places = []
+        
+        for el in elements:
+            tags = el.get('tags', {})
+            name = tags.get('name')
+            if not name:
+                continue
+                
+            amenity = tags.get('amenity')
+            emergency = tags.get('emergency')
+            
+            if amenity == 'police':
+                place_type = 'police'
+                phone = tags.get('phone', tags.get('contact:phone', '100'))
+            elif amenity == 'hospital' or emergency == 'ambulance_station':
+                if emergency == 'ambulance_station':
+                    place_type = 'ambulance'
+                    phone = tags.get('phone', tags.get('contact:phone', '108'))
+                else:
+                    place_type = 'trauma'
+                    phone = tags.get('phone', tags.get('contact:phone', '108'))
+            else:
+                continue
+                
+            # Clean multiple phone numbers or weird OSM formatting (keep first valid digits/spaces/plus)
+            clean_phone = phone.split(';')[0].split(',')[0].strip()
+            
+            places.append({
+                "type": place_type,
+                "name": name,
+                "lat": el.get('lat'),
+                "lng": el.get('lon'),
+                "phone": clean_phone
+            })
+            
+        logging.info(f"✅ Found {len(places)} emergency resources near lat={lat}, lng={lng}")
+        return jsonify({
+            "success": True,
+            "last_sync_lat": float(lat),
+            "last_sync_lng": float(lng),
+            "places": places[:50]
+        })
+        
+    except Exception as e:
+        logging.error(f"Error in sync_emergency: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route('/debug-sessions', methods=['GET'])
 def debug_sessions():
     return jsonify(call_sessions)
+
 
 
 if __name__ == '__main__':
