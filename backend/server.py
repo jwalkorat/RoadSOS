@@ -587,9 +587,71 @@ def sync_emergency():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+# In-memory history cache
+emergency_events_history = []
+
+@app.route('/log-emergency-event', methods=['POST'])
+def log_emergency_event():
+    try:
+        data = request.json or {}
+        event_id = data.get('eventId')
+        timestamp = data.get('timestamp')
+        lat = data.get('lat')
+        lng = data.get('lng')
+        category = data.get('category')
+        offline_reason = data.get('offlineReason', 'none')
+
+        if not event_id or not timestamp:
+            return jsonify({"success": False, "error": "Missing eventId or timestamp"}), 400
+
+        event_record = {
+            "eventId": event_id,
+            "timestamp": timestamp,
+            "lat": lat,
+            "lng": lng,
+            "category": category,
+            "offlineReason": offline_reason
+        }
+
+        logging.info(f"💾 Received logged emergency event! ID: {event_id} | Category: {category} | Reason: {offline_reason}")
+        
+        emergency_events_history.append(event_record)
+
+        # Write to a persistent file safely
+        try:
+            import json
+            log_dir = "/tmp/logs" if os.name != "nt" else "logs"
+            os.makedirs(log_dir, exist_ok=True)
+            history_file = os.path.join(log_dir, "emergency_history.json")
+            
+            existing_history = []
+            if os.path.exists(history_file):
+                with open(history_file, "r", encoding="utf-8") as f:
+                    try:
+                        existing_history = json.load(f)
+                    except Exception:
+                        pass
+                        
+            if not any(e.get("eventId") == event_id for e in existing_history):
+                existing_history.append(event_record)
+                with open(history_file, "w", encoding="utf-8") as f:
+                    json.dump(existing_history, f, indent=4, ensure_ascii=False)
+        except Exception as log_err:
+            logging.warning(f"Could not write emergency history file: {log_err}")
+
+        return jsonify({"success": True, "message": "Emergency event successfully logged"})
+    except Exception as e:
+        logging.error(f"Error in log_emergency_event: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route('/debug-sessions', methods=['GET'])
 def debug_sessions():
-    return jsonify(call_sessions)
+    return jsonify({
+        "call_sessions": call_sessions,
+        "emergency_events_history": emergency_events_history
+    })
+
 
 
 
